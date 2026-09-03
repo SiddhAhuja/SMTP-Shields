@@ -1,0 +1,15 @@
+Delivered-To: victim@company.com
+Received: from mail.suspicious-relay.com (185.158.113.120) by mx.google.com with ESMTPS;
+          Wed, 02 Sep 2026 10:15:20 -0700
+From: "IT Helpdesk" <support@secure-login-microsoft.com>
+To: "Employee" <victim@company.com>
+Subject: CRITICAL: Your Office 365 Account Will Expire in 12 Hours
+Date: Wed, 02 Sep 2026 13:10:00 +0000
+
+Dear Employee,
+
+Your Microsoft 365 password has expired. You must immediately update your credentials to prevent account termination and loss of email files.
+
+Click here to verify: http://update-secure-auth.com/login
+
+IT Security Team
