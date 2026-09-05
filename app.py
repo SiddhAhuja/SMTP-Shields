@@ -4,6 +4,7 @@ import json
 import math
 import re
 import email.utils
+from urllib.parse import urlparse
 from datetime import datetime, timezone
 from email import policy
 from email.parser import BytesParser
@@ -28,6 +29,10 @@ GEMINI_API_KEY = "AIzaSyDLFWw_PFuv8S71fZxXB8tGT4IWL7URIW8"
 GEMINI_MODEL = "gemini-2.5-flash"
 IP_API_URL = "http://ip-api.com/json/{ip}?fields=status,message,country,regionName,city,lat,lon,isp,org,query"
 IPV4_RE = re.compile(r"\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b")
+URL_RE = re.compile(r'https?://[^\s<>"\']+')
+
+DISPOSABLE_DOMAINS = {"mailinator.com", "guerrillamail.com", "temp-mail.org", "10minutemail.com", "yopmail.com", "throwawaymail.com", "burnermail.io", "tempmail.net", "sharklasers.com"}
+URL_SHORTENERS = {"bit.ly", "tinyurl.com", "t.co", "goo.gl", "ow.ly", "is.gd", "buff.ly", "cutt.ly"}
 
 def haversine(lat1, lon1, lat2, lon2):
     R = 6371.0
@@ -62,7 +67,11 @@ st.set_page_config(page_title="Email Threat Forensics", page_icon="🛡️", lay
 st.markdown(
     """
     <style>
-      .stApp { background-color: #0c0a00; color: #fef08a; }
+      .stApp { 
+        background-color: #0c0a00;
+        background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)' opacity='0.06'/%3E%3C/svg%3E");
+        color: #fef08a; 
+      }
       div[data-testid="stMetric"] { background: #1a1600; border: 1px solid #b45309; border-radius: 4px; padding: 12px; }
       h1, h2, h3, p { color: #fef08a !important; }
     </style>
@@ -78,10 +87,11 @@ def parse_eml(raw: bytes) -> dict:
     
     sender = msg.get("From", "N/A")
     domain = sender.split("@")[-1].strip("<>") if "@" in sender else ""
+    urls = list(set(URL_RE.findall(body_text)))
     
     return {
-        "from": sender, "domain": domain, "subject": msg.get("Subject", "N/A"),
-        "received": received, "body": (body_text or "")[:8000]
+        "from": sender, "domain": domain.lower(), "subject": msg.get("Subject", "N/A"),
+        "received": received, "body": (body_text or "")[:8000], "urls": urls
     }
 
 st.title("🛡️ Advanced Email Threat Detection")
@@ -100,6 +110,7 @@ if not raw_bytes: st.stop()
 
 sha256 = hashlib.sha256(raw_bytes).hexdigest()
 parsed = parse_eml(raw_bytes)
+is_burner = parsed["domain"] in DISPOSABLE_DOMAINS
 
 hops = []
 seen = set()
@@ -111,7 +122,7 @@ for r in parsed["received"]:
                 seen.add(ip)
         except: pass
 
-with st.spinner("Interrogating live DNS & executing calculus optimizations..."):
+with st.spinner("Interrogating live DNS & executing psychological analysis..."):
     dns_records = check_live_dns(parsed["domain"])
     geo_data = []
     for h in hops:
@@ -122,10 +133,24 @@ with st.spinner("Interrogating live DNS & executing calculus optimizations..."):
                 geo_data.append(resp)
         except: pass
 
-c1, c2, c3 = st.columns(3)
+    # AI Psychological Analysis
+    prompt = f"""Analyze this email for social engineering tactics.
+Return ONLY valid JSON with keys: classification (Phishing/BEC/Clean), threat_score (0-100), rationale, and manipulation_matrix (object with boolean keys: urgency, authority_impersonation, financial_fear).
+Body excerpt: {parsed['body'][:4000]}"""
+    
+    ai_data = {"classification": "Unknown", "threat_score": 0, "rationale": "AI Unavailable", "manipulation_matrix": {}}
+    if genai:
+        try:
+            genai.configure(api_key=GEMINI_API_KEY)
+            response = genai.GenerativeModel(GEMINI_MODEL).generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+            ai_data = json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", (response.text or "").strip()))
+        except: pass
+
+c1, c2, c3, c4 = st.columns(4)
 c1.metric("Live SPF Record", "Verified" if "v=spf1" in dns_records["SPF"].lower() else "Failed/None")
 c2.metric("Live DMARC Record", "Verified" if "v=dmarc1" in dns_records["DMARC"].lower() else "Failed/None")
-c3.metric("Public Hops Extracted", str(len(geo_data)))
+c3.metric("Burner Domain", "🚨 YES (High Risk)" if is_burner else "No")
+c4.metric("AI Threat Score", f"{ai_data.get('threat_score', 0)} / 100")
 
 st.subheader("Unaltered Cryptographic Lock")
 st.code(f"SHA-256: {sha256}", language="text")
@@ -134,39 +159,26 @@ st.caption("This digital seal guarantees the payload features remain completely 
 left, right = st.columns((1, 1))
 
 with left:
-    st.subheader("Kinematics & OSINT Pivots")
-    table = []
-    for i in range(len(geo_data)):
-        row = geo_data[i]
-        speed = "N/A"
-        if i > 0 and row.get("time") and geo_data[i-1].get("time"):
-            dist = haversine(geo_data[i-1]["lat"], geo_data[i-1]["lon"], row["lat"], row["lon"])
-            time_diff = abs((row["time"] - geo_data[i-1]["time"]).total_seconds())
-            if time_diff > 0:
-                calc_speed = dist / time_diff
-                speed = f"{calc_speed:.2f} km/s"
-                if calc_speed > 200000: speed += " ⚠️ (Impossible)"
-
-        table.append({
-            "Hop": i+1,
-            "IP": row["query"],
-            "Location": f"{row.get('city')}, {row.get('country')}",
-            "Velocity (dx/dt)": speed,
-            "VirusTotal": f"https://www.virustotal.com/gui/search/{row['query']}"
-        })
+    st.subheader("Psychological Manipulation Matrix")
+    matrix = ai_data.get("manipulation_matrix", {})
+    st.write(f"**Urgency / Time Pressure:** {'🔴 Detected' if matrix.get('urgency') else '🟢 Clear'}")
+    st.write(f"**Authority Impersonation:** {'🔴 Detected' if matrix.get('authority_impersonation') else '🟢 Clear'}")
+    st.write(f"**Financial Fear / Extortion:** {'🔴 Detected' if matrix.get('financial_fear') else '🟢 Clear'}")
     
-    st.data_editor(
-        table,
-        column_config={"VirusTotal": st.column_config.LinkColumn("OSINT Check")},
-        hide_index=True, use_container_width=True
+    st.markdown(
+        f"<div style='padding:10px;border-left:4px solid #b45309;background:#1a1600;margin-top:1rem;'>"
+        f"<b>AI Rationale:</b> {ai_data.get('rationale')}</div>",
+        unsafe_allow_html=True
     )
 
 with right:
-    st.subheader("Geodesic Hop Mapping")
-    if geo_data:
-        fmap = folium.Map(location=[geo_data[0]["lat"], geo_data[0]["lon"]], zoom_start=2, tiles="CartoDB dark_matter")
-        path = [(r["lat"], r["lon"]) for r in geo_data]
-        for idx, (lat, lon) in enumerate(path, 1):
-            folium.CircleMarker(location=(lat, lon), radius=6, color="#fef08a", fill=True, popup=f"Hop {idx}").add_to(fmap)
-        folium.PolyLine(path, color="#b45309", weight=2, opacity=0.8).add_to(fmap)
-        st_folium(fmap, width=None, height=350)
+    st.subheader("URL Quarantine Zone")
+    if parsed["urls"]:
+        url_table = []
+        for url in parsed["urls"]:
+            domain = urlparse(url).netloc.lower()
+            warning = "⚠️ Masked Link" if domain in URL_SHORTENERS else "Standard URL"
+            url_table.append({"Extracted Link (Unclickable)": url, "Status": warning})
+        st.dataframe(url_table, use_container_width=True, hide_index=True)
+    else:
+        st.success("No external links found in the payload.")
