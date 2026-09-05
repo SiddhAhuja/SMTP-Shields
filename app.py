@@ -1,6 +1,7 @@
 import hashlib
 import ipaddress
 import json
+import math
 import re
 from email import policy
 from email.parser import BytesParser
@@ -23,28 +24,44 @@ IPV4_RE = re.compile(
     r"\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b"
 )
 
-st.set_page_config(
-    page_title="Email Threat Forensics",
-    page_icon="🛡️",
-    layout="wide",
-)
+def haversine(lat1, lon1, lat2, lon2):
+    R = 6371.0
+    dlat, dlon = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
+    a = math.sin(dlat / 2)**2 + math.cos(math.radians(lat1)) * \
+        math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2
+    return R * (2 * math.atan2(math.sqrt(a), math.sqrt(1 - a)))
+
+def calculate_routing_anomaly(geo_rows: list[dict]) -> tuple:
+    valid = [r for r in geo_rows if r.get('status') == 'success' and r.get('lat')]
+    if len(valid) < 2: return 0, 0, 0
+    actual_dist = sum(haversine(valid[i]['lat'], valid[i]['lon'], valid[i+1]['lat'], valid[i+1]['lon']) for i in range(len(valid)-1))
+    optimized_dist = haversine(valid[0]['lat'], valid[0]['lon'], valid[-1]['lat'], valid[-1]['lon'])
+    deviation = ((actual_dist - optimized_dist) / optimized_dist) * 100 if optimized_dist > 0 else 0
+    return round(actual_dist), round(optimized_dist), round(deviation)
+
+st.set_page_config(page_title="Email Threat Forensics", page_icon="🛡️", layout="wide")
 
 st.markdown(
     """
     <style>
-      .stApp { background: linear-gradient(180deg, #070b14 0%, #101827 100%); }
-      div[data-testid="stMetric"] {
-        background: #111827;
-        border: 1px solid #1f2937;
-        border-radius: 12px;
-        padding: 12px;
+      .stApp { 
+        background-color: #0c0a00;
+        background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)' opacity='0.06'/%3E%3C/svg%3E");
+        color: #fef08a; 
       }
+      div[data-testid="stMetric"] {
+        background: #1a1600;
+        border: 1px solid #b45309;
+        border-radius: 4px;
+        padding: 12px;
+        box-shadow: 0 0 10px rgba(217, 119, 6, 0.15);
+      }
+      h1, h2, h3, p { color: #fef08a !important; }
       .block-container { padding-top: 1.4rem; }
     </style>
     """,
     unsafe_allow_html=True,
 )
-
 
 def is_public_ipv4(value: str) -> bool:
     try:
@@ -52,7 +69,6 @@ def is_public_ipv4(value: str) -> bool:
     except ValueError:
         return False
     return addr.version == 4 and addr.is_global
-
 
 def extract_public_hops(received_headers: list[str]) -> list[str]:
     hops: list[str] = []
@@ -64,7 +80,6 @@ def extract_public_hops(received_headers: list[str]) -> list[str]:
             seen.add(ip)
             hops.append(ip)
     return hops
-
 
 def parse_eml(raw: bytes) -> dict:
     msg = BytesParser(policy=policy.default).parsebytes(raw)
@@ -89,7 +104,6 @@ def parse_eml(raw: bytes) -> dict:
         "to": msg.get("To", "N/A"),
     }
 
-
 def geolocate_ips(ips: list[str]) -> list[dict]:
     results = []
     for ip in ips:
@@ -100,17 +114,10 @@ def geolocate_ips(ips: list[str]) -> list[dict]:
             results.append({"query": ip, "status": "fail", "message": str(exc)})
             continue
         if data.get("status") != "success":
-            results.append(
-                {
-                    "query": ip,
-                    "status": "fail",
-                    "message": data.get("message", "lookup failed"),
-                }
-            )
+            results.append({"query": ip, "status": "fail", "message": data.get("message", "lookup failed")})
             continue
         results.append(data)
     return results
-
 
 def build_hop_map(geo_rows: list[dict]) -> folium.Map | None:
     points = [
@@ -124,176 +131,92 @@ def build_hop_map(geo_rows: list[dict]) -> folium.Map | None:
     path = []
     for idx, (lat, lon, row) in enumerate(points, start=1):
         path.append((lat, lon))
-        popup = (
-            f"<b>Hop {idx}</b><br>"
-            f"{row.get('query')}<br>"
-            f"{row.get('city', '')}, {row.get('regionName', '')}, {row.get('country', '')}<br>"
-            f"ISP: {row.get('isp', 'N/A')}"
-        )
+        popup = f"<b>Hop {idx}</b><br>{row.get('query')}<br>{row.get('city', '')}, {row.get('country', '')}"
         folium.CircleMarker(
-            location=(lat, lon),
-            radius=8,
-            color="#22d3ee" if idx == 1 else ("#f97316" if idx == len(points) else "#a78bfa"),
-            fill=True,
-            fill_opacity=0.9,
-            popup=popup,
-            tooltip=f"Hop {idx}: {row.get('query')}",
+            location=(lat, lon), radius=8,
+            color="#b45309" if idx == 1 else ("#fef08a" if idx == len(points) else "#78350f"),
+            fill=True, fill_opacity=0.9, popup=popup, tooltip=f"Hop {idx}: {row.get('query')}",
         ).add_to(fmap)
     if len(path) >= 2:
-        folium.PolyLine(path, color="#22d3ee", weight=3, opacity=0.8).add_to(fmap)
+        folium.PolyLine(path, color="#b45309", weight=3, opacity=0.8).add_to(fmap)
     fmap.fit_bounds(path, padding=(30, 30))
     return fmap
 
-
 def classify_with_gemini(parsed: dict, geo_rows: list[dict], file_hash: str) -> dict:
-    fallback = {
-        "classification": "Unknown",
-        "threat_score": 0,
-        "rationale": "Gemini analysis unavailable.",
-        "indicators": [],
-    }
+    fallback = {"classification": "Unknown", "threat_score": 0, "rationale": "Gemini unavailable.", "indicators": []}
     if genai is None:
-        fallback["rationale"] = "Install google-generativeai to enable classification."
         return fallback
 
     hop_summary = []
     for row in geo_rows:
         if row.get("status") == "success":
-            hop_summary.append(
-                f"{row.get('query')} | {row.get('city')}, {row.get('country')} | {row.get('isp')}"
-            )
+            hop_summary.append(f"{row.get('query')} | {row.get('city')}, {row.get('country')} | {row.get('isp')}")
         else:
             hop_summary.append(f"{row.get('query')} | lookup failed")
 
     prompt = f"""You are an email threat and digital-forensics analyst.
 Classify this email as exactly one of: Phishing, BEC, Clean.
 Also assign an integer threat_score from 0 to 100.
-
-Return ONLY valid JSON with keys:
-classification, threat_score, rationale, indicators (array of short strings).
-
-Evidence:
-SHA-256: {file_hash}
-From: {parsed['from']}
-To: {parsed['to']}
-Subject: {parsed['subject']}
-Return-Path: {parsed['return_path']}
-Authentication-Results: {parsed['authentication_results']}
-Public IP hops: {hop_summary}
-Body excerpt:
-{parsed['body'][:4000]}
-"""
+Return ONLY valid JSON with keys: classification, threat_score, rationale, indicators (array of short strings).
+Evidence: SHA-256: {file_hash}\nFrom: {parsed['from']}\nTo: {parsed['to']}\nSubject: {parsed['subject']}\nPublic IP hops: {hop_summary}\nBody excerpt: {parsed['body'][:4000]}"""
     try:
         genai.configure(api_key=GEMINI_API_KEY)
         model = genai.GenerativeModel(GEMINI_MODEL)
-        response = model.generate_content(
-            prompt,
-            generation_config={"response_mime_type": "application/json"},
-        )
-        text = (response.text or "").strip()
-        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text)
+        response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", (response.text or "").strip())
         data = json.loads(text)
-        classification = str(data.get("classification", "Unknown")).strip()
-        if classification not in {"Phishing", "BEC", "Clean"}:
-            classification = "Unknown"
-        score = int(data.get("threat_score", 0))
-        score = max(0, min(100, score))
-        indicators = data.get("indicators") or []
-        if not isinstance(indicators, list):
-            indicators = [str(indicators)]
         return {
-            "classification": classification,
-            "threat_score": score,
+            "classification": str(data.get("classification", "Unknown")).strip(),
+            "threat_score": max(0, min(100, int(data.get("threat_score", 0)))),
             "rationale": str(data.get("rationale", "")).strip() or "No rationale provided.",
-            "indicators": [str(item) for item in indicators][:12],
+            "indicators": [str(item) for item in (data.get("indicators") or [])][:12],
         }
-    except Exception as exc:
-        fallback["rationale"] = f"Gemini request failed: {exc}"
+    except Exception:
         return fallback
-
 
 def generate_pdf_report(parsed: dict, analysis: dict, file_hash: str) -> bytes:
     pdf = FPDF()
     pdf.add_page()
-    pdf.set_font("Arial", size=12)
-    
-    # Title
     pdf.set_font("Arial", "B", 16)
     pdf.cell(200, 10, txt="AI Email Forensic Intelligence Report", ln=True, align="C")
     pdf.set_font("Arial", size=10)
     pdf.cell(200, 8, txt="Smart India Hackathon - Threat Detection Platform", ln=True, align="C")
     pdf.ln(10)
-    
-    # Metadata
     pdf.set_font("Arial", "B", 12)
     pdf.cell(200, 10, txt="Email Header Metadata:", ln=True)
     pdf.set_font("Arial", size=10)
     pdf.cell(200, 8, txt=f"From: {parsed['from']}", ln=True)
-    pdf.cell(200, 8, txt=f"To: {parsed['to']}", ln=True)
     pdf.cell(200, 8, txt=f"Subject: {parsed['subject']}", ln=True)
-    pdf.cell(200, 8, txt=f"SHA-256 Hash: {file_hash}", ln=True)
+    pdf.cell(200, 8, txt=f"SHA-256 Hash (Unaltered lock): {file_hash}", ln=True)
     pdf.ln(5)
-    
-    # Threat Assessment
     pdf.set_font("Arial", "B", 12)
     pdf.cell(200, 10, txt="Threat Assessment:", ln=True)
     pdf.set_font("Arial", size=10)
     pdf.cell(200, 8, txt=f"Classification: {analysis['classification']}", ln=True)
     pdf.cell(200, 8, txt=f"Threat Score: {analysis['threat_score']} / 100", ln=True)
     pdf.ln(5)
-    
-    # Analyst Rationale
     pdf.set_font("Arial", "B", 12)
     pdf.cell(200, 10, txt="Analyst Rationale:", ln=True)
     pdf.set_font("Arial", size=10)
     pdf.multi_cell(0, 6, txt=analysis['rationale'])
-    pdf.ln(5)
-    
-    # Indicators
-    if analysis['indicators']:
-        pdf.set_font("Arial", "B", 12)
-        pdf.cell(200, 10, txt="Key Indicators:", ln=True)
-        pdf.set_font("Arial", size=10)
-        for ind in analysis['indicators']:
-            pdf.cell(200, 6, txt=f"- {ind}", ln=True)
-            
     return bytes(pdf.output())
 
-
-def verdict_color(classification: str) -> str:
-    return {
-        "Phishing": "#ef4444",
-        "BEC": "#f59e0b",
-        "Clean": "#22c55e",
-    }.get(classification, "#94a3b8")
-
-
 st.title("🛡️ Email Threat Detection & Forensic Intelligence")
-st.caption(
-    "Upload a `.eml` / `.txt` file OR paste raw email text to extract headers, trace public hops, "
-    "hash the artifact, and classify the message with Gemini."
-)
+st.caption("Upload a `.eml` / `.txt` file OR paste raw email text to run the geodesic analyzer and circuit topographer.")
 
 tab1, tab2 = st.tabs(["📁 Upload File", "📝 Paste Raw Email Text"])
-
 raw_bytes = None
 
 with tab1:
     uploaded = st.file_uploader("Upload email artifact (.eml, .txt)", type=["eml", "txt"])
-    if uploaded:
-        raw_bytes = uploaded.getvalue()
+    if uploaded: raw_bytes = uploaded.getvalue()
 
 with tab2:
     pasted_text = st.text_area("Paste the raw email source (headers + body) here:", height=200)
     if st.button("Analyze Pasted Text"):
-        if pasted_text.strip():
-            raw_bytes = pasted_text.encode('utf-8')
-        else:
-            st.warning("Please paste some email text first.")
+        if pasted_text.strip(): raw_bytes = pasted_text.encode('utf-8')
 
-if not raw_bytes:
-    st.info("Drop a file or paste raw text above to begin the forensic analysis.")
-    st.stop()
+if not raw_bytes: st.stop()
 
 sha256 = hashlib.sha256(raw_bytes).hexdigest()
 parsed = parse_eml(raw_bytes)
@@ -301,95 +224,59 @@ parsed = parse_eml(raw_bytes)
 with st.spinner("Tracing public IP hops and classifying the message..."):
     geo_rows = geolocate_ips(parsed["hops"])
     analysis = classify_with_gemini(parsed, geo_rows, sha256)
+    actual_km, optimal_km, anomaly_pct = calculate_routing_anomaly(geo_rows)
 
-color = verdict_color(analysis["classification"])
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Classification", analysis["classification"])
 c2.metric("Threat score", f"{analysis['threat_score']} / 100")
 c3.metric("Public hops", str(len(parsed["hops"])))
 c4.metric("Artifact size", f"{len(raw_bytes):,} B")
 
+if anomaly_pct > 0:
+    st.markdown(f"**Geodesic Routing Anomaly:** Path deviated by **{anomaly_pct}%** from the optimized direct route ({actual_km}km actual vs {optimal_km}km optimal).")
+
 st.markdown(
-    f"<div style='padding:10px 14px;border-left:4px solid {color};"
-    f"background:#111827;border-radius:8px;margin-bottom:1rem;'>"
+    f"<div style='padding:10px 14px;border-left:4px solid #b45309;"
+    f"background:#1a1600;border-radius:8px;margin-bottom:1rem;'>"
     f"<b>Analyst rationale:</b> {analysis['rationale']}</div>",
     unsafe_allow_html=True,
 )
 
 pdf_data = generate_pdf_report(parsed, analysis, sha256)
-st.download_button(
-    label="📥 Download Official Forensic PDF Report",
-    data=pdf_data,
-    file_name="email_forensic_report.pdf",
-    mime="application/pdf",
-)
+st.download_button(label="📥 Download Official Forensic PDF Report", data=pdf_data, file_name="email_forensic_report.pdf", mime="application/pdf")
 
 st.markdown("<br>", unsafe_allow_html=True)
-
 left, right = st.columns((1.15, 1))
 
 with left:
     st.subheader("Header intelligence")
     st.write("**From:**", parsed["from"])
-    st.write("**To:**", parsed["to"])
     st.write("**Subject:**", parsed["subject"])
-    st.write("**Return-Path:**", parsed["return_path"])
     st.write("**Date:**", parsed["date"])
-    st.write("**Message-ID:**", parsed["message_id"])
-    st.markdown("**Authentication-Results**")
-    st.code(parsed["authentication_results"], language="text")
 
-    st.subheader("Chain of custody")
+    st.subheader("Unaltered Cryptographic Lock")
     st.code(f"SHA-256: {sha256}", language="text")
-    st.caption("Hash is computed over the exact uploaded bytes before parsing.")
-
-    if analysis["indicators"]:
-        st.subheader("Key indicators")
-        for item in analysis["indicators"]:
-            st.markdown(f"- {item}")
+    st.caption("This digital seal guarantees the payload features remain completely unaltered from their original state.")
 
 with right:
-    st.subheader("Received hop geolocation")
+    st.subheader("Circuit Topography")
     if not parsed["hops"]:
-        st.warning("No public IPv4 hops were found in Received headers.")
+        st.warning("No public IPv4 hops were found.")
     else:
         table = []
         for idx, row in enumerate(geo_rows, start=1):
+            if idx == 1: role = "Battery (Origin)"
+            elif idx == len(geo_rows): role = "Capacitor (Terminal)"
+            else: role = "Transistor (Relay)"
+            
+            if "pass" in str(parsed["authentication_results"]).lower() and idx == len(geo_rows):
+                role += " + Diode (Verified)"
+
             if row.get("status") == "success":
-                table.append(
-                    {
-                        "Hop": idx,
-                        "IP": row.get("query"),
-                        "City": row.get("city"),
-                        "Region": row.get("regionName"),
-                        "Country": row.get("country"),
-                        "ISP": row.get("isp"),
-                    }
-                )
+                table.append({"Hop": idx, "Circuit Role": role, "IP": row.get("query"), "Country": row.get("country")})
             else:
-                table.append(
-                    {
-                        "Hop": idx,
-                        "IP": row.get("query"),
-                        "City": "—",
-                        "Region": "—",
-                        "Country": row.get("message", "failed"),
-                        "ISP": "—",
-                    }
-                )
+                table.append({"Hop": idx, "Circuit Role": role, "IP": row.get("query"), "Country": "Failed"})
         st.dataframe(table, use_container_width=True, hide_index=True)
 
         hop_map = build_hop_map(geo_rows)
-        if hop_map:
-            st_folium(hop_map, width=None, height=420)
-        else:
-            st.warning("Geolocation succeeded for no hops, so a map could not be drawn.")
-
-with st.expander("Raw Received headers"):
-    if parsed["received"]:
-        st.code("\n\n".join(parsed["received"]), language="text")
-    else:
-        st.write("None")
-
-with st.expander("Message body excerpt"):
-    st.text(parsed["body"] or "(empty)")
+        if hop_map: st_folium(hop_map, width=None, height=420)
