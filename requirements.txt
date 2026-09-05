@@ -4,3 +4,4 @@ folium
 requests
 fpdf2
 google-generativeai
+dnspython
